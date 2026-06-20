@@ -1,0 +1,32 @@
+version: 1
+
+project:
+  name: example-node-web
+
+commit:
+  convention: conventional
+  allowed_types: [feat, fix, docs, refactor, test, chore]
+  scopes: [app, api, ui, dependencies]
+  protected_branches: [main]
+  confirm_push: true
+
+docker:
+  compose_files:
+    - compose.yaml
+  profiles:
+    - development
+
+workflows:
+  setup:
+    description: Install project dependencies
+    steps:
+      - run: npm ci
+
+  check:
+    description: Run linting and tests
+    steps:
+      - run: npm run lint
+      - run: npm test
+
+policies:
+  confirm_destructive_actions: true

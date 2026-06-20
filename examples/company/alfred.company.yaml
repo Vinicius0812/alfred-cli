@@ -1,0 +1,13 @@
+version: 1
+
+commit:
+  convention: conventional
+  allowed_types: [feat, fix, docs, refactor, test, chore, perf]
+  protected_branches: [main, develop]
+  require_scope: true
+  confirm_commit: true
+  confirm_push: true
+
+policies:
+  require_clean_worktree: true
+  confirm_destructive_actions: true

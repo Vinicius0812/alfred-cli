@@ -1,0 +1,36 @@
+version: 1
+
+extends:
+  - ./alfred.company.yaml
+
+project:
+  name: customer-portal
+
+commit:
+  convention: conventional
+  allowed_types: [feat, fix, docs, refactor, test, chore, perf]
+  scopes: [web, api, authentication, billing]
+  protected_branches: [main, develop]
+  require_scope: true
+  confirm_commit: true
+  confirm_push: true
+
+docker:
+  compose_files:
+    - compose.yaml
+  profiles:
+    - development
+
+workflows:
+  verify:
+    description: Run the checks required before review
+    steps:
+      - run: npm ci
+      - run: npm run lint
+      - run: npm test
+
+  start:
+    description: Start the local development stack
+    steps:
+      - run: docker compose --profile development up -d
+        confirm: true

@@ -1,0 +1,33 @@
+version: 1
+
+project:
+  name: example-php-api
+
+commit:
+  convention: conventional
+  allowed_types: [feat, fix, docs, refactor, test, chore]
+  scopes: [api, domain, database, infrastructure]
+  protected_branches: [main]
+  confirm_push: true
+
+docker:
+  compose_files:
+    - compose.yaml
+  env_files:
+    - .env
+
+workflows:
+  setup:
+    description: Prepare application dependencies
+    steps:
+      - run: composer install
+      - run: php artisan migrate
+        confirm: true
+
+  test:
+    description: Run the PHP test suite
+    steps:
+      - run: composer test
+
+policies:
+  confirm_destructive_actions: true

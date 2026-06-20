@@ -1,0 +1,32 @@
+version: 1
+
+project:
+  name: example-go-api
+
+commit:
+  convention: conventional
+  allowed_types: [feat, fix, docs, refactor, test, chore, perf]
+  scopes: [api, database, infrastructure]
+  protected_branches: [main]
+  confirm_push: true
+
+docker:
+  compose_files:
+    - compose.yaml
+
+workflows:
+  test:
+    description: Run unit tests
+    steps:
+      - run: go test ./...
+
+  check:
+    description: Format, vet, and test the project
+    steps:
+      - run: gofmt -w .
+      - run: go vet ./...
+      - run: go test ./...
+
+policies:
+  require_clean_worktree: true
+  confirm_destructive_actions: true
