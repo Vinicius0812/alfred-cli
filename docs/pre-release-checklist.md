@@ -30,7 +30,9 @@ Use this checklist before publishing an Alfred release.
 Windows:
 
 ```powershell
-iwr https://raw.githubusercontent.com/Vinicius0812/alfred-cli/master/scripts/install.ps1 -UseB | iex
+$installer = Join-Path $env:TEMP "install-alfred.ps1"
+Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Vinicius0812/alfred-cli/v0.1.0/scripts/install.ps1" -UseBasicParsing -OutFile $installer
+PowerShell -NoProfile -ExecutionPolicy Bypass -File $installer
 alfred --version
 alfred --lang pt-BR help
 ```
