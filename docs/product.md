@@ -44,13 +44,42 @@ The first public version contains:
 - `alfred run <workflow>` for explicitly declared local workflows;
 - local preset inheritance through `extends`.
 
+## AI-assisted commits
+
+Alfred's `commit` command should support generating Conventional Commit
+messages from the current Git diff, inspired by the previous UNI CLI workflow.
+
+Because Alfred is open source and intended for broad community use, AI support
+must be optional and provider-agnostic:
+
+- users can write commit messages manually without configuring any AI provider;
+- AI-generated messages are proposed for review before commit execution;
+- Alfred must not send diffs to a remote provider unless the user explicitly
+  enables that behavior;
+- credentials must come from environment variables or user-level configuration,
+  never from project files committed to a repository;
+- provider selection should be configurable so free or local options can be
+  evaluated before choosing a default recommendation;
+- OpenRouter can be supported as one provider, but must not be hardcoded as the
+  only path.
+
+When this feature is implemented, evaluate currently available free or
+low-friction options for open source users, including:
+
+- local models through tools such as Ollama or compatible local runtimes;
+- free-tier hosted APIs where terms allow this use case;
+- OpenRouter free models, when available;
+- bring-your-own-key providers compatible with an OpenAI-style API.
+
+The exact provider list should be researched at implementation time because
+free tiers, model availability, and terms change frequently.
+
 ## Out Of Scope For V1
 
 - remote presets downloaded automatically;
 - binary or in-process plugin systems;
 - user and role authorization;
 - secrets management;
-- AI commit providers;
 - opinionated merge or release flows;
 - Docker image building APIs beyond invoking Docker Compose;
 - a full-screen TUI;

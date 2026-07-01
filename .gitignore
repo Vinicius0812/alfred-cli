@@ -1,1 +1,66 @@
+# Project-local context and agent runtime files
 CONTEXT_UNI.md
+.agents/
+.codex/
+
+# Build and release artifacts
+bin/
+dist/
+build/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go coverage/profiling output
+coverage.out
+coverage.html
+*.coverprofile
+*.prof
+
+# Environment files and local configuration
+.env
+.env.*
+!.env.example
+.alfred/
+alfred.local.yaml
+alfred.*.local.yaml
+
+# Secrets and credentials
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.csr
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+secrets/
+.secret/
+*.secret
+*.secrets
+
+# Logs and temporary files
+*.log
+logs/
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.code-workspace
