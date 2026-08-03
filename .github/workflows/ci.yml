@@ -1,0 +1,92 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality and security
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: go.mod
+          cache: true
+          cache-dependency-path: go.sum
+
+      - name: Check formatting
+        shell: bash
+        run: |
+          set -euo pipefail
+          files="$(gofmt -l .)"
+          if [[ -n "$files" ]]; then
+            printf 'The following files are not formatted:\n%s\n' "$files"
+            exit 1
+          fi
+
+      - name: Verify modules
+        run: go mod verify
+
+      - name: Run tests with race detector
+        run: go test -race -coverprofile=coverage.out ./...
+
+      - name: Run static analysis
+        run: go vet ./...
+
+      - name: Build smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build \
+            -trimpath \
+            -ldflags="-X github.com/Vinicius0812/alfred-cli/internal/cli.Version=ci" \
+            -o bin/alfred \
+            ./cmd/alfred
+          [[ "$(./bin/alfred --version)" == "alfred ci" ]]
+
+      - name: Check installer syntax
+        shell: bash
+        run: |
+          set -euo pipefail
+          sh -n scripts/install.sh
+          bash scripts/validate-version-test.sh
+          bash scripts/release-notes-test.sh
+          bash scripts/install-sh-test.sh
+
+      - name: Check PowerShell installer syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            (Resolve-Path "scripts/install.ps1"),
+            [ref] $tokens,
+            [ref] $errors
+          ) | Out-Null
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+          & "scripts/install-ps1-test.ps1"
+
+      - name: Lint GitHub Actions workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+      - name: Scan Go vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...

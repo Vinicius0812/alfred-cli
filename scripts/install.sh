@@ -9,6 +9,33 @@ command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+validate_repo() {
+  owner="${REPO%%/*}"
+  name="${REPO#*/}"
+
+  if [ -z "$owner" ] || [ -z "$name" ] || [ "$name" = "$REPO" ]; then
+    echo "invalid repository: expected owner/repository" >&2
+    exit 1
+  fi
+  case "$name" in
+    */*) echo "invalid repository: expected owner/repository" >&2; exit 1 ;;
+  esac
+  case "$owner$name" in
+    *[!A-Za-z0-9._-]*) echo "invalid repository: expected owner/repository" >&2; exit 1 ;;
+  esac
+}
+
+validate_version() {
+  if ! printf '%s\n' "$VERSION" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+    echo "invalid Alfred version: expected vMAJOR.MINOR.PATCH" >&2
+    exit 1
+  fi
+  case "$VERSION" in
+    *'
+'*) echo "invalid Alfred version: expected vMAJOR.MINOR.PATCH" >&2; exit 1 ;;
+  esac
+}
+
 detect_os() {
   os="$(uname -s | tr '[:upper:]' '[:lower:]')"
   case "$os" in
@@ -51,19 +78,43 @@ download() {
   fi
 }
 
+calculate_sha256() {
+  file="$1"
+  if command_exists sha256sum; then
+    sha256sum "$file" | awk '{print tolower($1)}'
+  elif command_exists shasum; then
+    shasum -a 256 "$file" | awk '{print tolower($1)}'
+  elif command_exists openssl; then
+    openssl dgst -sha256 "$file" | awk '{print tolower($NF)}'
+  else
+    echo "sha256sum, shasum, or openssl is required to verify the download" >&2
+    exit 1
+  fi
+}
+
+expected_sha256() {
+  checksum_file="$1"
+  filename="$2"
+  awk -v name="$filename" '$2 == name || $2 == "*" name { print tolower($1) }' "$checksum_file"
+}
+
+validate_repo
+
 if [ "$VERSION" = "latest" ]; then
   VERSION="$(latest_version)"
 fi
 
-if [ -z "$VERSION" ]; then
-  echo "could not determine Alfred version" >&2
-  exit 1
-fi
+validate_version
+
+command_exists tar || { echo "tar is required" >&2; exit 1; }
+command_exists install || { echo "install is required" >&2; exit 1; }
 
 os="$(detect_os)"
 arch="$(detect_arch)"
 archive="alfred_${VERSION}_${os}_${arch}.tar.gz"
-url="https://github.com/$REPO/releases/download/$VERSION/$archive"
+release_base_url="https://github.com/$REPO/releases/download/$VERSION"
+archive_url="$release_base_url/$archive"
+checksum_url="$release_base_url/checksums.txt"
 tmp_dir="$(mktemp -d)"
 
 cleanup() {
@@ -72,9 +123,34 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 mkdir -p "$INSTALL_DIR"
-download "$url" "$tmp_dir/$archive"
+download "$archive_url" "$tmp_dir/$archive"
+download "$checksum_url" "$tmp_dir/checksums.txt"
+
+expected="$(expected_sha256 "$tmp_dir/checksums.txt" "$archive")"
+case "$expected" in
+  *'
+'*) echo "could not find exactly one valid checksum for $archive" >&2; exit 1 ;;
+esac
+if ! printf '%s\n' "$expected" | grep -Eq '^[a-f0-9]{64}$'; then
+  echo "could not find exactly one valid checksum for $archive" >&2
+  exit 1
+fi
+
+actual="$(calculate_sha256 "$tmp_dir/$archive")"
+if [ "$actual" != "$expected" ]; then
+  echo "checksum verification failed for $archive" >&2
+  exit 1
+fi
+
+echo "Verified SHA-256 checksum for $archive"
 tar -xzf "$tmp_dir/$archive" -C "$tmp_dir"
-install "$tmp_dir/alfred" "$INSTALL_DIR/alfred"
+
+if [ ! -f "$tmp_dir/alfred" ]; then
+  echo "the downloaded archive does not contain alfred" >&2
+  exit 1
+fi
+
+install -m 0755 "$tmp_dir/alfred" "$INSTALL_DIR/alfred"
 
 echo "Alfred installed at $INSTALL_DIR/alfred"
 case ":$PATH:" in
