@@ -1,9 +1,11 @@
 # Alfred CLI
 
+[![CI](https://github.com/Vinicius0812/alfred-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Vinicius0812/alfred-cli/actions/workflows/ci.yml)
+
 Alfred is an open source developer assistant for automating repetitive project
 tasks with predictable, versioned configuration.
 
-The first release focuses on:
+The product direction focuses on:
 
 - validating local development environments;
 - creating standardized Conventional Commits;
@@ -61,33 +63,40 @@ Then run:
 
 ## Install from a GitHub release
 
-After the first GitHub release is published, users can install Alfred with the
-provided scripts.
+Starting with `v0.2.0`, release assets include versioned installer scripts. The
+installers download `checksums.txt` and verify the selected archive's SHA-256
+digest before extracting or copying the Alfred binary.
 
 Windows PowerShell:
 
 ```powershell
+$release = Invoke-RestMethod -Uri "https://api.github.com/repos/Vinicius0812/alfred-cli/releases/latest"
+$version = $release.tag_name
 $installer = Join-Path $env:TEMP "install-alfred.ps1"
-Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Vinicius0812/alfred-cli/v0.1.0/scripts/install.ps1" -UseBasicParsing -OutFile $installer
-PowerShell -NoProfile -ExecutionPolicy Bypass -File $installer
-```
-
-Or, as a one-liner:
-
-```powershell
-$installer = Join-Path $env:TEMP "install-alfred.ps1"; Invoke-WebRequest -Uri "https://raw.githubusercontent.com/Vinicius0812/alfred-cli/v0.1.0/scripts/install.ps1" -UseBasicParsing -OutFile $installer; PowerShell -NoProfile -ExecutionPolicy Bypass -File $installer
+Invoke-WebRequest -Uri "https://github.com/Vinicius0812/alfred-cli/releases/download/$version/install.ps1" -OutFile $installer
+PowerShell -NoProfile -ExecutionPolicy Bypass -File $installer -Version $version
 ```
 
 Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Vinicius0812/alfred-cli/master/scripts/install.sh | sh
+version="$(curl -fsSL https://api.github.com/repos/Vinicius0812/alfred-cli/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
+curl -fsSLo install-alfred.sh "https://github.com/Vinicius0812/alfred-cli/releases/download/$version/install.sh"
+ALFRED_VERSION="$version" sh ./install-alfred.sh
 ```
 
-Specific versions can be installed with `ALFRED_VERSION`:
+The current `v0.1.0` preview predates automatic checksum verification. Download
+its archive and `checksums.txt` from the
+[release page](https://github.com/Vinicius0812/alfred-cli/releases/tag/v0.1.0)
+and compare the SHA-256 digest manually before installation.
+
+Specific `v0.2.0+` versions can be installed by downloading the installer from
+that same release tag and passing `ALFRED_VERSION`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Vinicius0812/alfred-cli/master/scripts/install.sh | ALFRED_VERSION=v0.1.0 sh
+version="v0.2.0"
+curl -fsSLo install-alfred.sh "https://github.com/Vinicius0812/alfred-cli/releases/download/$version/install.sh"
+ALFRED_VERSION="$version" sh ./install-alfred.sh
 ```
 
 ## Language
@@ -138,6 +147,12 @@ and the [examples](examples/) for the current design.
 Alfred is in early implementation. The current CLI can initialize and validate
 configuration, run a basic environment doctor, and be built as a native binary.
 The remaining MVP commands are still under development.
+
+## Security
+
+Treat project configuration as code and review every workflow or preset before
+using future execution commands. See the [Security Policy](SECURITY.md) for the
+support policy, trust boundaries, and private reporting guidance.
 
 ## License
 
