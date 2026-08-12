@@ -32,17 +32,24 @@ share policies without maintaining a fork.
 - companies sharing development policies across repositories;
 - maintainers who want repeatable project commands without bespoke shell docs.
 
-## MVP
+## Implemented secure automation baseline
 
-The first public version contains:
+The `v0.2.0` scope contains:
 
 - `alfred init` to create an `alfred.yaml`;
-- `alfred config validate` to validate and explain merged configuration;
+- `alfred config validate` and `config explain` for merged configuration;
 - `alfred doctor` to inspect required tools, files, and project conditions;
-- `alfred commit` for Conventional Commits and optional push confirmation;
-- `alfred docker up|down` for configured Docker Compose projects;
-- `alfred run <workflow>` for explicitly declared local workflows;
-- local preset inheritance through `extends`.
+- `alfred workflow list` and `alfred run <workflow>` with planning, direct
+  process execution, risk-based confirmation, cancellation, and auditing;
+- `alfred run list|show` for local audit inspection;
+- local preset inheritance through `extends`, project-root restricted by
+  default;
+- the `go-secure` development preset;
+- English and Brazilian Portuguese interaction and shell completions.
+
+The typed `commit` and `docker` sections preserve the intended public contract,
+but their command adapters remain roadmap items after the secure workflow
+engine has been exercised in real projects.
 
 ## AI-assisted commits
 
@@ -74,7 +81,7 @@ low-friction options for open source users, including:
 The exact provider list should be researched at implementation time because
 free tiers, model availability, and terms change frequently.
 
-## Out Of Scope For V1
+## Out of scope for the current release
 
 - remote presets downloaded automatically;
 - binary or in-process plugin systems;
@@ -82,7 +89,7 @@ free tiers, model availability, and terms change frequently.
 - secrets management;
 - opinionated merge or release flows;
 - Docker image building APIs beyond invoking Docker Compose;
-- a full-screen TUI;
+- a full-screen TUI or plugin runtime;
 - replacing Git, Docker, or project package managers.
 
 These features may be added after real usage demonstrates the need.

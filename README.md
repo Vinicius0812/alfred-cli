@@ -2,96 +2,53 @@
 
 [![CI](https://github.com/Vinicius0812/alfred-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/Vinicius0812/alfred-cli/actions/workflows/ci.yml)
 
-Alfred is an open source developer assistant for automating repetitive project
-tasks with predictable, versioned configuration.
-
-The product direction focuses on:
-
-- validating local development environments;
-- creating standardized Conventional Commits;
-- managing Docker Compose projects;
-- running project workflows declared in YAML;
-- allowing teams and companies to share reusable presets.
-
-Alfred's core stays generic. Company-specific branch rules, commit policies,
-Docker settings, and workflows belong in configuration, not in the executable.
-
-## Current Commands
+Alfred is an open source CLI for secure, explicit, and auditable development
+automation. It turns project checks into versioned workflows while keeping
+execution inspectable: structured commands run without a shell, sensitive
+operations require policy-based confirmation, and every run can produce a
+local audit record.
 
 ```text
-alfred menu
-alfred init
-alfred doctor
-alfred config validate
-alfred version
-alfred help
+       /\                 /\
+      /  \__         __/  \
+      \     \_______/     /
+       \____/ ALFRED \____/
 ```
 
-## Planned Commands
+The interface is available in English and Brazilian Portuguese.
 
-```text
-alfred init
-alfred doctor
-alfred commit
-alfred docker up
-alfred docker down
-alfred run <workflow>
-alfred config validate
-```
+## Highlights
 
-## Build from source
+- strict, typed `alfred.yaml` configuration with actionable validation;
+- duplicate-key, alias, size, depth, path, symlink, and environment guardrails;
+- local preset inheritance, restricted to the project by default;
+- structured `command` + `args` execution without a platform shell;
+- explicit opt-in and confirmation for exceptional shell steps;
+- risk classes for read, local write, network, Git write, and destructive work;
+- dry-run planning, timeouts, Ctrl+C cancellation, and stable exit codes;
+- secret redaction from subprocess output and audit diagnostics;
+- local JSON audit records under `.alfred/runs`;
+- human-readable or JSON output for automation;
+- a secure Go preset and completions for Bash, Zsh, and PowerShell;
+- versioned native releases with checksums, SBOMs, provenance attestations, and
+  post-publication smoke tests.
 
-Alfred is implemented in Go and is intended to be distributed as a native
-binary.
+## Install
 
-```bash
-go build -o bin/alfred ./cmd/alfred
-```
-
-On Windows:
-
-```powershell
-go build -o bin/alfred.exe ./cmd/alfred
-```
-
-Then run:
-
-```powershell
-.\bin\alfred.exe --version
-.\bin\alfred.exe config validate
-```
-
-## Install from a GitHub release
-
-Starting with `v0.2.0`, release assets include versioned installer scripts. The
-installers download `checksums.txt` and verify the selected archive's SHA-256
-digest before extracting or copying the Alfred binary.
+Download the installer from the release you intend to trust. The installers
+verify the selected binary archive against the published SHA-256 checksum
+before installation.
 
 Windows PowerShell:
 
 ```powershell
-$release = Invoke-RestMethod -Uri "https://api.github.com/repos/Vinicius0812/alfred-cli/releases/latest"
-$version = $release.tag_name
+$version = "v0.2.0"
 $installer = Join-Path $env:TEMP "install-alfred.ps1"
 Invoke-WebRequest -Uri "https://github.com/Vinicius0812/alfred-cli/releases/download/$version/install.ps1" -OutFile $installer
 PowerShell -NoProfile -ExecutionPolicy Bypass -File $installer -Version $version
 ```
 
-Linux/macOS:
-
-```bash
-version="$(curl -fsSL https://api.github.com/repos/Vinicius0812/alfred-cli/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)"
-curl -fsSLo install-alfred.sh "https://github.com/Vinicius0812/alfred-cli/releases/download/$version/install.sh"
-ALFRED_VERSION="$version" sh ./install-alfred.sh
-```
-
-The current `v0.1.0` preview predates automatic checksum verification. Download
-its archive and `checksums.txt` from the
-[release page](https://github.com/Vinicius0812/alfred-cli/releases/tag/v0.1.0)
-and compare the SHA-256 digest manually before installation.
-
-Specific `v0.2.0+` versions can be installed by downloading the installer from
-that same release tag and passing `ALFRED_VERSION`:
+Linux or macOS:
 
 ```bash
 version="v0.2.0"
@@ -99,24 +56,58 @@ curl -fsSLo install-alfred.sh "https://github.com/Vinicius0812/alfred-cli/releas
 ALFRED_VERSION="$version" sh ./install-alfred.sh
 ```
 
-## Language
-
-Alfred supports English and Brazilian Portuguese CLI messages:
+To build from source:
 
 ```bash
-alfred --lang en help
-alfred --lang pt-BR help
+go build -trimpath -o bin/alfred ./cmd/alfred
+./bin/alfred --version
 ```
 
-The language can also be selected with:
+Use `bin/alfred.exe` on Windows.
+
+## Quick start
+
+Create a minimal configuration:
 
 ```bash
-ALFRED_LANG=pt-BR alfred help
+alfred init --project example-api
 ```
 
-## Configuration
+For a Go project, create the secure preset:
 
-Projects are configured through `alfred.yaml`:
+```bash
+alfred init --project example-api --preset go-secure
+alfred config validate
+alfred workflow list
+alfred run verify --dry-run
+alfred run verify
+```
+
+The `go-secure` preset runs tests, static analysis, module verification, and
+`govulncheck`. Its networked vulnerability scan is identified in the plan and
+requires confirmation by default.
+
+## Commands
+
+```text
+alfred menu
+alfred init [--project name] [--preset basic|go-secure] [--force]
+alfred doctor
+alfred config validate [--output text|json]
+alfred config explain [--output text|json]
+alfred workflow list [--output text|json]
+alfred run <workflow> [--dry-run] [--yes] [--timeout duration] [--output text|json]
+alfred run list [--output text|json]
+alfred run show <id> [--output text|json]
+alfred completion <bash|zsh|powershell>
+alfred version
+alfred help
+```
+
+See [Command Reference](docs/commands.md) for behavior, examples, output
+contracts, and exit codes.
+
+## Configuration example
 
 ```yaml
 version: 1
@@ -124,35 +115,69 @@ version: 1
 project:
   name: example-api
 
-commit:
-  convention: conventional
-  confirm_push: true
-
-docker:
-  compose_files:
-    - compose.yaml
+policies:
+  confirm_network_actions: true
+  confirm_git_actions: true
+  confirm_destructive_actions: true
+  audit: true
 
 workflows:
-  test:
-    description: Run the project test suite
+  verify:
+    description: Validate the Go project
     steps:
-      - run: go test ./...
+      - name: Run tests
+        command: go
+        args: [test, ./...]
+        risk: read
+        timeout: 10m
 ```
 
-See [Product Scope](docs/product.md), [Configuration v1](docs/configuration-v1.md),
-and the [examples](examples/) for the current design.
+Structured arguments are passed directly to the executable. Alfred does not
+concatenate them into a shell command. Review [Configuration v1](docs/configuration-v1.md)
+and [Secure Workflows](docs/workflows.md) before enabling shell steps.
 
-## Status
+## Language
 
-Alfred is in early implementation. The current CLI can initialize and validate
-configuration, run a basic environment doctor, and be built as a native binary.
-The remaining MVP commands are still under development.
+```bash
+alfred --lang en help
+alfred --lang pt-BR menu
+```
 
-## Security
+Set `ALFRED_LANG=en` or `ALFRED_LANG=pt-BR` to select a default. Unsupported
+language values are rejected instead of silently falling back.
 
-Treat project configuration as code and review every workflow or preset before
-using future execution commands. See the [Security Policy](SECURITY.md) for the
-support policy, trust boundaries, and private reporting guidance.
+## Verify a release
+
+After checking an archive against `checksums.txt`, users with GitHub CLI can
+verify that GitHub Actions produced the artifact from this repository:
+
+```bash
+gh attestation verify alfred_v0.2.0_linux_amd64.tar.gz \
+  --repo Vinicius0812/alfred-cli
+```
+
+Each target also has a matching `*.cdx.json` CycloneDX SBOM in the release.
+An attestation proves build provenance, not that an artifact is vulnerability
+free; users should still evaluate the source, workflow, checksum, and SBOM.
+
+## Security model
+
+Treat `alfred.yaml` as code. Alfred applies guardrails and makes behavior
+auditable, but it is not an operating-system sandbox. A confirmed command runs
+with the current user's permissions. Remote presets are not supported and
+external local presets require the explicit `--allow-external-extends` trust
+decision.
+
+See [Security Policy](SECURITY.md), [Secure Workflows](docs/workflows.md),
+[Architecture](docs/architecture.md), [Interface Identity](docs/identity.md),
+and [Release Roadmap](docs/roadmap.md).
+
+## Roadmap
+
+The workflow engine and secure execution baseline form the `v0.2.0` scope.
+Provider-agnostic, review-before-use commit message assistance and Docker
+Compose adapters remain future features; neither will bypass the same planning,
+confirmation, audit, and secret-handling rules.
 
 ## License
 

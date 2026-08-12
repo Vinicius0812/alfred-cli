@@ -25,12 +25,20 @@ workflows:
   verify:
     description: Run the checks required before review
     steps:
-      - run: npm ci
-      - run: npm run lint
-      - run: npm test
+      - command: npm
+        args: [ci]
+        risk: network
+      - command: npm
+        args: [run, lint]
+        risk: read
+      - command: npm
+        args: [test]
+        risk: read
 
   start:
     description: Start the local development stack
     steps:
-      - run: docker compose --profile development up -d
+      - command: docker
+        args: [compose, --profile, development, up, -d]
         confirm: true
+        risk: local-write

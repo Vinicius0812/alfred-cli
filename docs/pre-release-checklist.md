@@ -10,6 +10,11 @@ Use this checklist before publishing an Alfred release.
 - [ ] A local binary builds successfully.
 - [ ] `alfred --version` prints the expected version when built with ldflags.
 - [ ] `alfred config validate` succeeds against the example configs.
+- [ ] A generated `go-secure` configuration passes `config validate` and
+      `run verify --dry-run`.
+- [ ] CLI text and JSON output tests pass in both supported languages.
+- [ ] YAML resource limits, symlink containment, confirmation, redaction,
+      timeout, and audit tests pass.
 - [ ] `alfred doctor` behavior is understood for examples that require missing
       tools such as Docker.
 
@@ -17,6 +22,8 @@ Use this checklist before publishing an Alfred release.
 
 - [ ] `README.md` documents current commands.
 - [ ] `docs/release.md` matches the actual release process.
+- [ ] `docs/commands.md`, `docs/workflows.md`, and
+      `docs/configuration-v1.md` match the CLI and schema.
 - [ ] `CHANGELOG.md` includes a non-empty `## vMAJOR.MINOR.PATCH` section for
       the release notes.
 - [ ] `LICENSE` is present.
@@ -29,7 +36,9 @@ Use this checklist before publishing an Alfred release.
 - [ ] The tag follows `vMAJOR.MINOR.PATCH`, for example `v0.1.0`.
 - [ ] The tag points to the exact commit intended for release.
 - [ ] GitHub Actions dependencies are pinned to reviewed full commit SHAs.
+- [ ] Default-branch protection requires CI and prevents force pushes.
 - [ ] The release does not already exist; published assets are never replaced.
+- [ ] Release permissions remain least-privilege for attestations and contents.
 
 ## Smoke test after release
 
@@ -56,4 +65,13 @@ alfred --lang en help
 ```
 
 For both platforms, confirm that the installer prints a successful SHA-256
-verification before reporting the installed binary path.
+verification before reporting the installed binary path. Also verify the
+downloaded archive provenance:
+
+```bash
+gh attestation verify <archive> --repo Vinicius0812/alfred-cli
+```
+
+Confirm that every target has a matching CycloneDX `*.cdx.json` asset. The
+release workflow performs these binary and installer smoke tests automatically
+for Linux AMD64 and Windows AMD64 after publication.

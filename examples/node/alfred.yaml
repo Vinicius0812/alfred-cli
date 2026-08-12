@@ -20,13 +20,19 @@ workflows:
   setup:
     description: Install project dependencies
     steps:
-      - run: npm ci
+      - command: npm
+        args: [ci]
+        risk: network
 
   check:
     description: Run linting and tests
     steps:
-      - run: npm run lint
-      - run: npm test
+      - command: npm
+        args: [run, lint]
+        risk: read
+      - command: npm
+        args: [test]
+        risk: read
 
 policies:
   confirm_destructive_actions: true

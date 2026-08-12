@@ -1,96 +1,63 @@
 # Alfred Configuration v1
 
-## Goals
+`alfred.yaml` is a strict, versioned contract. Unknown fields and ambiguous
+YAML constructs are rejected so that a typo cannot silently change execution.
 
-`alfred.yaml` describes project behavior, not Alfred's internal implementation.
-Version 1 intentionally exposes only:
+## Discovery and trust boundary
 
-```text
-version
-extends
-project
-commit
-docker
-workflows
-policies
-```
-
-Unknown fields are errors. This catches typos and keeps migrations explicit.
-
-## Discovery
-
-Alfred searches for `alfred.yaml` in the current directory and then each parent
-directory until it reaches the filesystem root.
-
-The first file found is the project configuration. Users may override discovery:
+Without `--config`, Alfred searches the current directory and its parents for
+the first `alfred.yaml`. The directory containing that file is the project root.
 
 ```bash
-alfred --config path/to/custom.yaml <command>
+alfred --config path/to/alfred.yaml config validate
 ```
 
-Relative paths are resolved from the file in which they are declared.
+Paths used by workflows, Docker settings, and `extends` are resolved against
+the project root and checked after symbolic-link resolution. They cannot escape
+the project root. `extends` may leave the root only when the user passes
+`--allow-external-extends`; use that flag solely for a reviewed, trusted preset.
+Remote configuration URLs are not supported.
 
-## Configuration Layers
+## Parsing guardrails
 
-Lowest to highest precedence:
+- maximum size per YAML file: 1 MiB;
+- maximum configuration graph: 64 local YAML files;
+- maximum YAML depth: 64;
+- maximum YAML nodes: 10,000;
+- exactly one YAML document per file;
+- mappings must use string keys;
+- duplicate keys, aliases, merge keys, and custom tags are rejected;
+- inheritance cycles and missing files are errors;
+- each inherited file is loaded once.
 
-1. Alfred defaults;
-2. global user configuration;
-3. files in `extends`, in listed order;
-4. project `alfred.yaml`;
-5. supported `ALFRED_*` environment variables;
-6. command-line flags.
+## Merge behavior
 
-The global configuration path follows the operating system convention:
+Extended files are applied in declaration order, followed by the project file.
+Maps merge recursively; scalar and list values replace earlier values. Workflow
+maps merge by workflow name. Extended files may be partial, but the final
+configuration must contain `version` and `project.name`.
+
+## Top-level schema
+
+Only these keys are valid:
 
 ```text
-Linux:   $XDG_CONFIG_HOME/alfred/config.yaml
-macOS:   ~/Library/Application Support/alfred/config.yaml
-Windows: %AppData%\alfred\config.yaml
+version, extends, project, commit, docker, workflows, policies
 ```
-
-Presets provide reusable defaults, not tamper-proof policy enforcement. Because
-the project file has higher precedence, organizations that require mandatory
-rules must validate the resolved Alfred configuration in CI as well.
-
-## Merge Rules
-
-- scalar values replace earlier values;
-- maps merge recursively;
-- lists replace earlier lists;
-- workflows merge by workflow name;
-- a project may replace an inherited workflow by declaring the same name;
-- `null` is not used to delete inherited values in v1.
-
-Replacement for lists is deliberate: appending security-sensitive policy lists
-can produce surprising results.
-
-## Top-Level Fields
 
 ### `version`
 
-Required integer. The only accepted value in this specification is `1`.
-Every project configuration and extended preset must declare its own version.
+Required integer. Version 1 accepts only `1`.
 
 ### `extends`
 
-Optional list of local YAML file paths.
+Optional list of local YAML paths.
 
 ```yaml
 extends:
   - ./config/alfred.company.yaml
   - ./config/alfred.team.yaml
 ```
-
-Rules:
-
-- remote URLs are rejected in v1;
-- cycles are errors;
-- missing files are errors;
-- an extended file may extend another local file;
-- a file may be loaded only once in a resolved configuration graph.
-- extended files may be partial and do not need to declare `project`;
-- the final merged configuration must satisfy all required fields.
 
 ### `project`
 
@@ -99,130 +66,129 @@ project:
   name: example-api
 ```
 
-Fields:
-
-| Field | Type | Required | Meaning |
-| --- | --- | --- | --- |
-| `name` | string | final config | Human-readable project identifier |
-
-The project root is the directory containing the discovered `alfred.yaml`; it
-is not configurable in v1.
+`name` is a required, non-empty string in the final configuration.
 
 ### `commit`
+
+The commit section is typed and validated for the future commit adapter.
 
 ```yaml
 commit:
   enabled: true
   convention: conventional
-  allowed_types:
-    - feat
-    - fix
-    - docs
-    - refactor
-    - test
-    - chore
-  scopes:
-    - api
-    - web
-  protected_branches:
-    - main
+  allowed_types: [feat, fix, docs, refactor, test, chore]
+  scopes: [api, web]
+  protected_branches: [main]
   require_scope: false
   emoji: false
   confirm_commit: true
   confirm_push: true
 ```
 
-Fields:
-
 | Field | Type | Default |
 | --- | --- | --- |
 | `enabled` | boolean | `true` |
 | `convention` | `conventional` | `conventional` |
-| `allowed_types` | list of strings | Conventional Commit defaults |
-| `scopes` | list of strings | unrestricted |
-| `protected_branches` | list of strings | `[main, master]` |
+| `allowed_types` | string list | Conventional defaults |
+| `scopes` | string list | empty |
+| `protected_branches` | string list | `main`, `master` |
 | `require_scope` | boolean | `false` |
 | `emoji` | boolean | `false` |
 | `confirm_commit` | boolean | `true` |
 | `confirm_push` | boolean | `true` |
 
-In v1, protected branches block commits. There is no user-based bypass in the
-project file. A future policy mechanism may introduce explicit exceptions.
-
 ### `docker`
+
+The Docker section is typed and path-validated for the future Compose adapter.
 
 ```yaml
 docker:
   enabled: true
-  compose_files:
-    - compose.yaml
-  profiles:
-    - development
-  env_files:
-    - .env
+  compose_files: [compose.yaml]
+  profiles: [development]
+  env_files: [.env]
   project_name: example-api
 ```
 
-Fields:
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `enabled` | boolean | `true` |
-| `compose_files` | list of paths | auto-detect Compose default |
-| `profiles` | list of strings | empty |
-| `env_files` | list of paths | empty |
-| `project_name` | string | unset |
-
-Alfred delegates to `docker compose`. It does not run Git operations as a side
-effect of Docker commands.
+`compose_files` and `env_files` must stay within the project root, including
+after symlink resolution.
 
 ### `workflows`
 
-Workflows are a map keyed by command name:
+Workflow names may contain letters, numbers, underscores, and hyphens. Each
+workflow requires a non-empty description and at least one step.
 
 ```yaml
 workflows:
-  setup:
-    description: Prepare the local environment
+  verify:
+    description: Verify the project
+    working_directory: .
+    environment:
+      REPORT_TOKEN: ${REPORT_TOKEN}
     steps:
-      - run: docker compose build
-      - run: docker compose up -d
-        confirm: true
+      - name: Run tests
+        command: go
+        args: [test, ./...]
+        working_directory: .
+        environment:
+          GOFLAGS: -mod=readonly
+        risk: read
+        timeout: 10m
+        confirm: false
+        continue_on_error: false
 ```
 
-A workflow contains:
+Workflow fields:
 
 | Field | Type | Required |
 | --- | --- | --- |
 | `description` | string | yes |
-| `working_directory` | path | no |
-| `environment` | map of strings | no |
-| `steps` | list of step objects | yes |
+| `working_directory` | project-local path | no |
+| `environment` | string map | no |
+| `steps` | step list | yes |
 
-A step contains:
+Structured step fields:
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `name` | string | command text |
-| `run` | string | required |
-| `working_directory` | path | workflow/project directory |
-| `environment` | map of strings | empty |
+| `name` | string | executable name |
+| `command` | string | required unless using explicit shell mode |
+| `args` | string list | empty |
+| `working_directory` | project-local path | workflow directory |
+| `environment` | string map | empty |
+| `risk` | risk enum | `local-write` |
+| `timeout` | positive Go duration | `10m` |
 | `confirm` | boolean | `false` |
 | `continue_on_error` | boolean | `false` |
 
-Commands run through the platform shell in v1. Alfred prints the command and
-working directory before execution. Workflow and step environments merge, with
-the step taking precedence.
+`command` and `args` are passed directly to the process API. Shell operators,
+redirection, interpolation, and pipelines have no special meaning.
 
-Environment values may reference existing variables:
+Shell execution is an exceptional compatibility mode:
 
 ```yaml
-environment:
-  REGISTRY_TOKEN: ${REGISTRY_TOKEN}
+policies:
+  allow_shell_steps: true
+
+workflows:
+  exceptional:
+    description: A reviewed shell-only operation
+    steps:
+      - name: Reviewed pipeline
+        run: go test ./... | tee test.log
+        shell: true
+        confirm: true
+        risk: local-write
 ```
 
-An unresolved variable is an error. Alfred never writes resolved secret values
-to diagnostic output.
+A shell step must set all three values: `run`, `shell: true`, and
+`confirm: true`; the final policy must also set `allow_shell_steps: true`.
+`command` and `run` are mutually exclusive.
+
+Environment names must match `[A-Za-z_][A-Za-z0-9_]*`. Values may reference an
+existing variable with `${NAME}`. An undefined variable is an error, while a
+defined empty variable is valid. Resolved values are passed to the child
+process but omitted from plans and masked from captured process output.
 
 ### `policies`
 
@@ -230,68 +196,35 @@ to diagnostic output.
 policies:
   require_clean_worktree: true
   confirm_destructive_actions: true
+  confirm_network_actions: true
+  confirm_git_actions: true
+  allow_shell_steps: false
+  allow_non_interactive: false
+  audit: true
 ```
 
-Fields:
-
-| Field | Type | Default |
+| Field | Default | Effect |
 | --- | --- | --- |
-| `require_clean_worktree` | boolean | `false` |
-| `confirm_destructive_actions` | boolean | `true` |
+| `require_clean_worktree` | `false` | Blocks `git-write` steps when `git status --porcelain` is non-empty |
+| `confirm_destructive_actions` | `true` | Confirms `destructive` steps |
+| `confirm_network_actions` | `true` | Confirms `network` steps |
+| `confirm_git_actions` | `true` | Confirms `git-write` steps |
+| `allow_shell_steps` | `false` | Enables explicitly declared shell steps |
+| `allow_non_interactive` | `false` | Allows `--yes` to answer required confirmations |
+| `audit` | `true` | Writes `.alfred/runs/<id>.json` |
 
-`require_clean_worktree` applies to Alfred operations that change Git state. It
-does not prevent read-only commands such as `doctor` or `config validate`.
+Risk values are `read`, `local-write`, `network`, `git-write`, and
+`destructive`. Risk is a declared security contract, not automatic command
+analysis; reviewers must verify that the selected class matches the command.
 
-Destructive built-in operations always honor `confirm_destructive_actions`.
-Workflow commands are user-defined and require explicit `confirm: true` when
-their authors want Alfred to prompt.
+## Inspect and validate
 
-## Validation
-
-`alfred config validate` must detect:
-
-- unsupported schema versions;
-- unknown fields;
-- invalid enum values and types;
-- empty required strings or lists;
-- missing or cyclic `extends`;
-- duplicate or invalid workflow names;
-- steps without `run`;
-- paths escaping the project root where a command requires project-local files;
-- unresolved environment references;
-- commit scopes required but not configured.
-
-Validation errors identify the source file and field path:
-
-```text
-alfred.yaml: commit.allowed_types[2]: value must not be empty
+```bash
+alfred config validate
+alfred config validate --output json
+alfred config explain
+alfred config explain --output json
 ```
 
-## Example
-
-```yaml
-version: 1
-
-project:
-  name: example-api
-
-commit:
-  convention: conventional
-  allowed_types: [feat, fix, docs, refactor, test, chore]
-  protected_branches: [main]
-  confirm_push: true
-
-docker:
-  compose_files:
-    - compose.yaml
-
-workflows:
-  test:
-    description: Run tests
-    steps:
-      - run: go test ./...
-
-policies:
-  require_clean_worktree: true
-  confirm_destructive_actions: true
-```
+`config explain` shows the merged typed model and every loaded file. It retains
+environment references such as `${TOKEN}` and does not print resolved values.

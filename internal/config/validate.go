@@ -5,11 +5,13 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
 
 var environmentReferencePattern = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}`)
+var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 func validateKnownShape(file string, node *yaml.Node) ErrorList {
 	var errs ErrorList
@@ -29,7 +31,7 @@ func validateKnownShape(file string, node *yaml.Node) ErrorList {
 	return errs
 }
 
-func validateFinalConfig(file, rootDir string, node *yaml.Node, getenv func(string) string) ErrorList {
+func validateFinalConfig(file, rootDir string, node *yaml.Node, lookupEnv func(string) (string, bool)) ErrorList {
 	var errs ErrorList
 
 	version := mappingValue(node, "version")
@@ -51,7 +53,7 @@ func validateFinalConfig(file, rootDir string, node *yaml.Node, getenv func(stri
 
 	errs = append(errs, validateFinalCommit(file, node)...)
 	errs = append(errs, validateFinalDockerPaths(file, rootDir, node)...)
-	errs = append(errs, validateFinalWorkflows(file, rootDir, node, getenv)...)
+	errs = append(errs, validateFinalWorkflows(file, rootDir, node, lookupEnv)...)
 
 	return errs
 }
@@ -101,6 +103,8 @@ func validatePoliciesShape(file string, node *yaml.Node) ErrorList {
 	}
 	return validateAllowedKeys(file, "policies", node, map[string]bool{
 		"require_clean_worktree": true, "confirm_destructive_actions": true,
+		"confirm_network_actions": true, "confirm_git_actions": true,
+		"allow_shell_steps": true, "allow_non_interactive": true, "audit": true,
 	})
 }
 
@@ -130,6 +134,9 @@ func validateWorkflowsShape(file string, node *yaml.Node) ErrorList {
 
 		if !isValidWorkflowName(name.Value) {
 			errs = append(errs, ValidationError{File: file, Path: workflowPath, Message: "workflow name must contain only letters, numbers, underscores, and hyphens"})
+		}
+		if name.Value == "list" || name.Value == "show" {
+			errs = append(errs, ValidationError{File: file, Path: workflowPath, Message: "workflow name is reserved by the run command"})
 		}
 
 		if workflow.Kind != yaml.MappingNode {
@@ -162,8 +169,9 @@ func validateStepsShape(file, workflowPath string, node *yaml.Node) ErrorList {
 			continue
 		}
 		errs = append(errs, validateAllowedKeys(file, stepPath, step, map[string]bool{
-			"name": true, "run": true, "working_directory": true, "environment": true,
-			"confirm": true, "continue_on_error": true,
+			"name": true, "command": true, "args": true, "run": true, "shell": true,
+			"working_directory": true, "environment": true, "confirm": true,
+			"continue_on_error": true, "timeout": true, "risk": true,
 		})...)
 		errs = append(errs, validateEnvironmentShape(file, stepPath+".environment", mappingValue(step, "environment"))...)
 	}
@@ -185,6 +193,9 @@ func validateEnvironmentShape(file, path string, node *yaml.Node) ErrorList {
 		if !isNonEmptyString(key) {
 			errs = append(errs, ValidationError{File: file, Path: path, Message: "environment variable names must be non-empty strings"})
 			continue
+		}
+		if !environmentNamePattern.MatchString(key.Value) {
+			errs = append(errs, ValidationError{File: file, Path: path + "." + key.Value, Message: "environment variable name must match [A-Za-z_][A-Za-z0-9_]*"})
 		}
 		if value.Kind != yaml.ScalarNode || value.Tag != "!!str" {
 			errs = append(errs, ValidationError{File: file, Path: path + "." + key.Value, Message: "must be a string"})
@@ -241,7 +252,7 @@ func validateFinalDockerPaths(file, rootDir string, node *yaml.Node) ErrorList {
 	return errs
 }
 
-func validateFinalWorkflows(file, rootDir string, node *yaml.Node, getenv func(string) string) ErrorList {
+func validateFinalWorkflows(file, rootDir string, node *yaml.Node, lookupEnv func(string) (string, bool)) ErrorList {
 	workflows := mappingValue(node, "workflows")
 	if workflows == nil {
 		return nil
@@ -266,7 +277,7 @@ func validateFinalWorkflows(file, rootDir string, node *yaml.Node, getenv func(s
 		}
 
 		errs = append(errs, validateProjectLocalPath(file, rootDir, workflowPath+".working_directory", mappingValue(workflow, "working_directory"))...)
-		errs = append(errs, validateEnvironmentReferences(file, workflowPath+".environment", mappingValue(workflow, "environment"), getenv)...)
+		errs = append(errs, validateEnvironmentReferences(file, workflowPath+".environment", mappingValue(workflow, "environment"), lookupEnv)...)
 
 		if steps == nil || steps.Kind != yaml.SequenceNode {
 			continue
@@ -276,14 +287,66 @@ func validateFinalWorkflows(file, rootDir string, node *yaml.Node, getenv func(s
 				continue
 			}
 			stepPath := fmt.Sprintf("%s.steps[%d]", workflowPath, stepIndex)
-			if !isNonEmptyString(mappingValue(step, "run")) {
-				errs = append(errs, ValidationError{File: file, Path: stepPath + ".run", Message: "must be a non-empty string"})
+			command := mappingValue(step, "command")
+			run := mappingValue(step, "run")
+			shell := mappingValue(step, "shell")
+			confirm := mappingValue(step, "confirm")
+			if command == nil && run == nil {
+				errs = append(errs, ValidationError{File: file, Path: stepPath, Message: "must define command with optional args, or an explicitly enabled shell run"})
+			}
+			if command != nil && run != nil {
+				errs = append(errs, ValidationError{File: file, Path: stepPath, Message: "command and run are mutually exclusive"})
+			}
+			if command != nil {
+				errs = append(errs, validateOptionalString(file, stepPath+".command", command)...)
+				if isNonEmptyString(command) && !strings.ContainsAny(command.Value, `/\`) && len(strings.Fields(command.Value)) != 1 {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".command", Message: "must name one executable; place parameters in args"})
+				}
+				errs = append(errs, validateOptionalStringList(file, stepPath+".args", mappingValue(step, "args"), false)...)
+				if shell != nil && shell.Value == "true" {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".shell", Message: "must be false for structured command steps"})
+				}
+			}
+			if run != nil {
+				errs = append(errs, validateOptionalString(file, stepPath+".run", run)...)
+				if mappingValue(step, "args") != nil {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".args", Message: "is only supported with a structured command"})
+				}
+				if shell == nil || shell.Tag != "!!bool" || shell.Value != "true" {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".shell", Message: "must be true for a run string"})
+				}
+				if confirm == nil || confirm.Tag != "!!bool" || confirm.Value != "true" {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".confirm", Message: "must be true for a shell step"})
+				}
+				policies := mappingValue(node, "policies")
+				allowShell := mappingValue(policies, "allow_shell_steps")
+				if allowShell == nil || allowShell.Tag != "!!bool" || allowShell.Value != "true" {
+					errs = append(errs, ValidationError{File: file, Path: "policies.allow_shell_steps", Message: "must be true when shell steps are configured"})
+				}
 			}
 			errs = append(errs, validateProjectLocalPath(file, rootDir, stepPath+".working_directory", mappingValue(step, "working_directory"))...)
-			errs = append(errs, validateEnvironmentReferences(file, stepPath+".environment", mappingValue(step, "environment"), getenv)...)
+			errs = append(errs, validateEnvironmentReferences(file, stepPath+".environment", mappingValue(step, "environment"), lookupEnv)...)
 			errs = append(errs, validateOptionalBool(file, stepPath+".confirm", mappingValue(step, "confirm"))...)
 			errs = append(errs, validateOptionalBool(file, stepPath+".continue_on_error", mappingValue(step, "continue_on_error"))...)
+			errs = append(errs, validateOptionalBool(file, stepPath+".shell", shell)...)
+			if timeoutNode := mappingValue(step, "timeout"); timeoutNode != nil {
+				if !isNonEmptyString(timeoutNode) {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".timeout", Message: "must be a Go duration such as 30s or 5m"})
+				} else if duration, err := time.ParseDuration(timeoutNode.Value); err != nil || duration <= 0 {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".timeout", Message: "must be a positive Go duration such as 30s or 5m"})
+				}
+			}
+			if riskNode := mappingValue(step, "risk"); riskNode != nil {
+				if !isNonEmptyString(riskNode) || !isAllowedRisk(riskNode.Value) {
+					errs = append(errs, ValidationError{File: file, Path: stepPath + ".risk", Message: "must be one of read, local-write, network, git-write, or destructive"})
+				}
+			}
 		}
+	}
+
+	policies := mappingValue(node, "policies")
+	for _, key := range []string{"require_clean_worktree", "confirm_destructive_actions", "confirm_network_actions", "confirm_git_actions", "allow_shell_steps", "allow_non_interactive", "audit"} {
+		errs = append(errs, validateOptionalBool(file, "policies."+key, mappingValue(policies, key))...)
 	}
 
 	return errs
@@ -377,17 +440,13 @@ func validateProjectLocalPath(file, rootDir, path string, node *yaml.Node) Error
 	if !filepath.IsAbs(candidate) {
 		candidate = filepath.Join(rootDir, candidate)
 	}
-	rel, err := filepath.Rel(rootDir, filepath.Clean(candidate))
-	if err != nil || rel == "." {
-		return nil
-	}
-	if strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+	if _, err := ResolveProjectPath(rootDir, candidate); err != nil {
 		return ErrorList{{File: file, Path: path, Message: "must not escape the project root"}}
 	}
 	return nil
 }
 
-func validateEnvironmentReferences(file, path string, node *yaml.Node, getenv func(string) string) ErrorList {
+func validateEnvironmentReferences(file, path string, node *yaml.Node, lookupEnv func(string) (string, bool)) ErrorList {
 	if node == nil || node.Kind != yaml.MappingNode {
 		return nil
 	}
@@ -399,12 +458,21 @@ func validateEnvironmentReferences(file, path string, node *yaml.Node, getenv fu
 			continue
 		}
 		for _, match := range environmentReferencePattern.FindAllStringSubmatch(value.Value, -1) {
-			if getenv(match[1]) == "" {
+			if _, ok := lookupEnv(match[1]); !ok {
 				errs = append(errs, ValidationError{File: file, Path: path + "." + key, Message: fmt.Sprintf("references unresolved environment variable %s", match[1])})
 			}
 		}
 	}
 	return errs
+}
+
+func isAllowedRisk(value string) bool {
+	switch value {
+	case RiskRead, RiskLocalWrite, RiskNetwork, RiskGitWrite, RiskDestructive:
+		return true
+	default:
+		return false
+	}
 }
 
 func isNonEmptyString(node *yaml.Node) bool {

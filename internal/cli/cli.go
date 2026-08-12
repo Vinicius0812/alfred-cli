@@ -1,77 +1,148 @@
 package cli
 
 import (
+	"bufio"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Vinicius0812/alfred-cli/internal/config"
 )
 
-var Version = "0.1.0-dev"
+var Version = "0.2.0-dev"
+
+const (
+	exitSuccess  = 0
+	exitFailure  = 1
+	exitUsage    = 2
+	exitCanceled = 130
+)
+
+type application struct {
+	stdin     io.Reader
+	reader    *bufio.Reader
+	stdout    io.Writer
+	stderr    io.Writer
+	lookupEnv func(string) (string, bool)
+	environ   func() []string
+	getwd     func() (string, error)
+	now       func() time.Time
+}
 
 func Run(args []string, stdout, stderr io.Writer) int {
-	global, command, err := parseArgs(args)
+	return RunWithIO(args, os.Stdin, stdout, stderr)
+}
+
+func RunWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	app := application{
+		stdin:     stdin,
+		reader:    bufio.NewReader(stdin),
+		stdout:    stdout,
+		stderr:    stderr,
+		lookupEnv: os.LookupEnv,
+		environ:   os.Environ,
+		getwd:     os.Getwd,
+		now:       time.Now,
+	}
+	return app.run(args)
+}
+
+func (a *application) run(args []string) int {
+	global, command, err := a.parseArgs(args)
 	msg := newMessages(global.lang)
 	if err != nil {
-		fmt.Fprintf(stderr, "alfred: %v\n", err)
-		return 2
+		fmt.Fprintf(a.stderr, "alfred: %s\n", localizeDiagnostic(err.Error(), global.lang))
+		return exitUsage
 	}
 
 	if len(command) == 0 {
-		printHelp(stdout, msg)
-		return 0
+		printHelp(a.stdout, msg)
+		return exitSuccess
 	}
 
 	switch command[0] {
 	case "-h", "--help", "help":
-		printHelp(stdout, msg)
-		return 0
+		printHelp(a.stdout, msg)
+		return exitSuccess
 	case "-v", "--version", "version":
-		fmt.Fprintf(stdout, "alfred %s\n", Version)
-		return 0
+		fmt.Fprintf(a.stdout, "alfred %s\n", Version)
+		return exitSuccess
 	case "menu":
-		return runMenu(global, msg, stdout, stderr)
+		return a.runMenu(global, msg)
 	case "init":
-		return runInit(command[1:], global, msg, stdout, stderr)
+		return a.runInit(command[1:], global, msg)
 	case "doctor":
-		return runDoctor(global, msg, stdout, stderr)
+		return a.runDoctor(command[1:], global, msg)
 	case "config":
-		return runConfig(command[1:], global, msg, stdout, stderr)
+		return a.runConfig(command[1:], global, msg)
+	case "workflow":
+		return a.runWorkflow(command[1:], global, msg)
+	case "run":
+		return a.runWorkflowExecution(command[1:], global, msg)
+	case "completion":
+		return a.runCompletion(command[1:], msg)
 	default:
-		fmt.Fprintf(stderr, msg.text("unknown_command")+"\n\n", command[0])
-		printHelp(stderr, msg)
-		return 2
+		fmt.Fprintf(a.stderr, msg.text("unknown_command")+"\n\n", command[0])
+		printHelp(a.stderr, msg)
+		return exitUsage
 	}
 }
 
 type globalOptions struct {
-	configPath string
-	lang       language
+	configPath           string
+	lang                 language
+	allowExternalExtends bool
+	noColor              bool
 }
 
-func parseArgs(args []string) (globalOptions, []string, error) {
-	opts := globalOptions{lang: resolveLanguage("")}
+func (a *application) parseArgs(args []string) (globalOptions, []string, error) {
+	envLanguage, _ := a.lookupEnv("ALFRED_LANG")
+	lang, err := resolveLanguage("", envLanguage)
+	if err != nil {
+		return globalOptions{}, nil, err
+	}
+	opts := globalOptions{lang: lang}
 	command := make([]string, 0, len(args))
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		switch arg {
-		case "--config":
+		if arg == "--" {
+			command = append(command, args[i+1:]...)
+			break
+		}
+		switch {
+		case arg == "--config":
 			if i+1 >= len(args) {
 				return opts, nil, fmt.Errorf("--config requires a path")
 			}
 			i++
 			opts.configPath = args[i]
-		case "--lang", "--language":
+		case strings.HasPrefix(arg, "--config="):
+			opts.configPath = strings.TrimPrefix(arg, "--config=")
+			if opts.configPath == "" {
+				return opts, nil, fmt.Errorf("--config requires a path")
+			}
+		case arg == "--lang" || arg == "--language":
 			if i+1 >= len(args) {
 				return opts, nil, fmt.Errorf("--lang requires a value")
 			}
 			i++
-			opts.lang = resolveLanguage(args[i])
+			opts.lang, err = resolveLanguage(args[i], "")
+			if err != nil {
+				return opts, nil, err
+			}
+		case strings.HasPrefix(arg, "--lang=") || strings.HasPrefix(arg, "--language="):
+			value := strings.SplitN(arg, "=", 2)[1]
+			opts.lang, err = resolveLanguage(value, "")
+			if err != nil {
+				return opts, nil, err
+			}
+		case arg == "--allow-external-extends":
+			opts.allowExternalExtends = true
+		case arg == "--no-color":
+			opts.noColor = true
 		default:
 			command = append(command, arg)
 		}
@@ -80,224 +151,32 @@ func parseArgs(args []string) (globalOptions, []string, error) {
 	return opts, command, nil
 }
 
-func runConfig(args []string, global globalOptions, msg messages, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
-		fmt.Fprintln(stdout, msg.text("config_usage"))
-		return 0
-	}
-
-	if args[0] != "validate" {
-		fmt.Fprintf(stderr, msg.text("unknown_config")+"\n", args[0])
-		return 2
-	}
-
-	if len(args) > 1 {
-		fmt.Fprintln(stderr, msg.text("config_extra_arg"))
-		return 2
-	}
-
-	cwd, err := os.Getwd()
+func (a *application) loadConfig(global globalOptions, msg messages) (config.Result, bool) {
+	cwd, err := a.getwd()
 	if err != nil {
-		fmt.Fprintf(stderr, msg.text("cwd_error")+"\n", err)
-		return 1
+		fmt.Fprintf(a.stderr, msg.text("cwd_error")+"\n", err)
+		return config.Result{}, false
 	}
-
 	result, err := config.LoadAndValidate(config.Options{
-		ConfigPath: global.configPath,
-		WorkingDir: cwd,
-		Getenv:     os.Getenv,
+		ConfigPath:           global.configPath,
+		WorkingDir:           cwd,
+		LookupEnv:            a.lookupEnv,
+		AllowExternalExtends: global.allowExternalExtends,
 	})
 	if err != nil {
-		fmt.Fprintf(stderr, "alfred: %v\n", err)
-		return 1
+		fmt.Fprintf(a.stderr, "alfred: %s\n", localizeDiagnostic(err.Error(), global.lang))
+		if strings.Contains(err.Error(), "not found") {
+			fmt.Fprintln(a.stderr, msg.text("config_missing_hint"))
+		}
+		return config.Result{}, false
 	}
-
 	if len(result.Errors) > 0 {
 		for _, validationErr := range result.Errors {
-			fmt.Fprintln(stderr, validationErr.Error())
+			fmt.Fprintln(a.stderr, validationErr.Localized(string(global.lang)))
 		}
-		return 1
+		return result, false
 	}
-
-	if result.ProjectName != "" {
-		fmt.Fprintln(stdout, msg.text("config_valid", result.ProjectName))
-	} else {
-		fmt.Fprintln(stdout, msg.text("config_valid_generic"))
-	}
-	fmt.Fprintln(stdout, msg.text("source", result.RootFile))
-	return 0
-}
-
-func runInit(args []string, global globalOptions, msg messages, stdout, stderr io.Writer) int {
-	opts := initOptions{}
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--project":
-			if i+1 >= len(args) {
-				fmt.Fprintf(stderr, "alfred: %s\n", msg.text("flag_requires_value", "--project"))
-				return 2
-			}
-			i++
-			opts.projectName = args[i]
-		case "--force":
-			opts.force = true
-		case "-h", "--help", "help":
-			fmt.Fprintln(stdout, msg.text("init_usage"))
-			return 0
-		default:
-			fmt.Fprintf(stderr, msg.text("unknown_init_argument")+"\n", args[i])
-			return 2
-		}
-	}
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(stderr, msg.text("cwd_error")+"\n", err)
-		return 1
-	}
-	if opts.projectName == "" {
-		opts.projectName = filepath.Base(cwd)
-	}
-
-	target := global.configPath
-	if target == "" {
-		target = filepath.Join(cwd, "alfred.yaml")
-	}
-	if !filepath.IsAbs(target) {
-		target = filepath.Join(cwd, target)
-	}
-
-	if _, err := os.Stat(target); err == nil && !opts.force {
-		fmt.Fprintf(stderr, msg.text("init_exists")+"\n", target)
-		return 1
-	} else if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(stderr, "alfred: %v\n", err)
-		return 1
-	}
-
-	content := initialConfig(opts.projectName)
-	if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
-		fmt.Fprintf(stderr, "alfred: %v\n", err)
-		return 1
-	}
-
-	fmt.Fprintln(stdout, msg.text("init_created", target))
-	return 0
-}
-
-type initOptions struct {
-	projectName string
-	force       bool
-}
-
-func initialConfig(projectName string) string {
-	return fmt.Sprintf(`version: 1
-
-project:
-  name: %s
-
-workflows:
-  test:
-    description: Run tests
-    steps:
-      - run: go test ./...
-
-policies:
-  confirm_destructive_actions: true
-`, projectName)
-}
-
-func runDoctor(global globalOptions, msg messages, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stdout, msg.text("doctor_title"))
-
-	cwd, err := os.Getwd()
-	if err != nil {
-		fmt.Fprintf(stderr, msg.text("cwd_error")+"\n", err)
-		return 1
-	}
-
-	result, err := config.LoadAndValidate(config.Options{
-		ConfigPath: global.configPath,
-		WorkingDir: cwd,
-		Getenv:     os.Getenv,
-	})
-	if err != nil {
-		fmt.Fprintln(stdout, msg.text("doctor_fail_config", err.Error()))
-		fmt.Fprintln(stdout, msg.text("doctor_invalid"))
-		return 1
-	}
-	if len(result.Errors) > 0 {
-		fmt.Fprintln(stdout, msg.text("doctor_fail_config", result.Errors.Error()))
-		fmt.Fprintln(stdout, msg.text("doctor_invalid"))
-		return 1
-	}
-
-	fmt.Fprintln(stdout, msg.text("doctor_ok_config", result.RootFile))
-
-	ok := true
-	tools := append([]string{"git"}, result.RequiredTools...)
-	for _, tool := range uniqueStrings(tools) {
-		if _, err := exec.LookPath(tool); err != nil {
-			fmt.Fprintln(stdout, msg.text("doctor_fail_tool", tool))
-			ok = false
-			continue
-		}
-		fmt.Fprintln(stdout, msg.text("doctor_ok_tool", tool))
-	}
-
-	if !ok {
-		fmt.Fprintln(stdout, msg.text("doctor_invalid"))
-		return 1
-	}
-	fmt.Fprintln(stdout, msg.text("doctor_valid"))
-	return 0
-}
-
-func runMenu(global globalOptions, msg messages, stdout, stderr io.Writer) int {
-	fmt.Fprintln(stdout, msg.text("menu_title"))
-	fmt.Fprintln(stdout, msg.text("menu_validate"))
-	fmt.Fprintln(stdout, msg.text("menu_doctor"))
-	fmt.Fprintln(stdout, msg.text("menu_init"))
-	fmt.Fprintln(stdout, msg.text("menu_version"))
-	fmt.Fprintln(stdout, msg.text("menu_exit"))
-	fmt.Fprint(stdout, msg.text("menu_prompt"))
-
-	var choice string
-	if _, err := fmt.Fscan(os.Stdin, &choice); err != nil {
-		fmt.Fprintf(stderr, "alfred: %v\n", err)
-		return 1
-	}
-
-	switch choice {
-	case "1":
-		return runConfig([]string{"validate"}, global, msg, stdout, stderr)
-	case "2":
-		return runDoctor(global, msg, stdout, stderr)
-	case "3":
-		return runInit(nil, global, msg, stdout, stderr)
-	case "4":
-		fmt.Fprintf(stdout, "alfred %s\n", Version)
-		return 0
-	case "0":
-		return 0
-	default:
-		fmt.Fprintln(stderr, msg.text("menu_invalid"))
-		return 2
-	}
-}
-
-func uniqueStrings(values []string) []string {
-	seen := map[string]bool{}
-	unique := make([]string, 0, len(values))
-	for _, value := range values {
-		value = strings.TrimSpace(value)
-		if value == "" || seen[value] {
-			continue
-		}
-		seen[value] = true
-		unique = append(unique, value)
-	}
-	return unique
+	return result, true
 }
 
 func printHelp(w io.Writer, msg messages) {

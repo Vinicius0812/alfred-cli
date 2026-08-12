@@ -84,7 +84,10 @@ jobs:
       - validate
       - test
     permissions:
+      artifact-metadata: write
+      attestations: write
       contents: write
+      id-token: write
     env:
       VERSION: ${{ needs.validate.outputs.version }}
     steps:
@@ -101,7 +104,7 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
-      - name: Build release artifacts
+      - name: Build release artifacts and SBOMs
         shell: bash
         run: |
           set -euo pipefail
@@ -132,6 +135,14 @@ jobs:
               -o "$output" \
               ./cmd/alfred
 
+            go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.9.0 \
+              bin \
+              -json \
+              -noserial \
+              -version "$VERSION" \
+              -output "dist/${name}.cdx.json" \
+              "$output"
+
             if [[ "$goos" == "windows" ]]; then
               (cd "dist/${name}" && zip -q "../${name}.zip" alfred.exe)
             else
@@ -146,8 +157,19 @@ jobs:
           fi
 
           cp scripts/install.ps1 scripts/install.sh dist/
-          (cd dist && sha256sum -- *.tar.gz *.zip install.ps1 install.sh > checksums.txt)
+          (cd dist && sha256sum -- *.tar.gz *.zip *.cdx.json install.ps1 install.sh > checksums.txt)
           bash scripts/release-notes.sh "$VERSION" CHANGELOG.md > dist/release-notes.md
+
+      - name: Attest release provenance
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.cdx.json
+            dist/checksums.txt
+            dist/install.ps1
+            dist/install.sh
 
       - name: Publish release without overwriting assets
         shell: bash
@@ -164,9 +186,76 @@ jobs:
           gh release create "$VERSION" \
             dist/*.tar.gz \
             dist/*.zip \
+            dist/*.cdx.json \
             dist/checksums.txt \
             dist/install.ps1 \
             dist/install.sh \
             --verify-tag \
             --title "$VERSION" \
             --notes-file dist/release-notes.md
+
+  smoke:
+    name: Verify published ${{ matrix.os }} release
+    runs-on: ${{ matrix.runner }}
+    needs:
+      - validate
+      - release
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux-amd64
+            runner: ubuntu-latest
+            archive: linux_amd64.tar.gz
+          - os: windows-amd64
+            runner: windows-latest
+            archive: windows_amd64.zip
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download published release files
+        shell: bash
+        env:
+          ARCHIVE_SUFFIX: ${{ matrix.archive }}
+        run: |
+          set -euo pipefail
+          archive="alfred_${VERSION}_${ARCHIVE_SUFFIX}"
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$archive" --pattern checksums.txt
+          printf '%s' "$archive" > archive-name.txt
+
+      - name: Verify checksum and provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(cat archive-name.txt)"
+          grep " ${archive}$" checksums.txt | sha256sum --check --strict
+          gh attestation verify "$archive" --repo "$GITHUB_REPOSITORY"
+
+      - name: Smoke test Linux binary and installer
+        if: matrix.os == 'linux-amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          archive="$(cat archive-name.txt)"
+          tar -xzf "$archive"
+          [[ "$(./alfred --version)" == "alfred ${VERSION}" ]]
+          gh release download "$VERSION" --repo "$GITHUB_REPOSITORY" --pattern install.sh
+          ALFRED_VERSION="$VERSION" ALFRED_INSTALL_DIR="$RUNNER_TEMP/alfred-bin" sh install.sh
+          [[ "$("$RUNNER_TEMP/alfred-bin/alfred" --version)" == "alfred ${VERSION}" ]]
+
+      - name: Smoke test Windows binary and installer
+        if: matrix.os == 'windows-amd64'
+        shell: pwsh
+        run: |
+          $archive = Get-Content -LiteralPath archive-name.txt -Raw
+          Expand-Archive -LiteralPath $archive -DestinationPath extracted
+          $actual = & (Join-Path $PWD "extracted/alfred.exe") --version
+          if ($actual -cne "alfred $env:VERSION") { throw "Unexpected version: $actual" }
+          gh release download $env:VERSION --repo $env:GITHUB_REPOSITORY --pattern install.ps1
+          $installDir = Join-Path $env:RUNNER_TEMP "alfred-bin"
+          & ./install.ps1 -Version $env:VERSION -InstallDir $installDir -NoPathUpdate
+          $installed = & (Join-Path $installDir "alfred.exe") --version
+          if ($installed -cne "alfred $env:VERSION") { throw "Unexpected installed version: $installed" }

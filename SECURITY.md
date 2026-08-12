@@ -48,8 +48,14 @@ during the preview phase.
 - Destructive, networked, or Git-mutating operations should be inspectable and
   require the configured confirmation policy.
 
-The current `v0.1.x` implementation validates configuration and the local
-environment but does not yet execute configured workflows.
+Starting with `v0.2.0`, Alfred executes explicitly selected workflows. It uses
+structured process execution by default, risk-based confirmations, restricted
+project paths, timeouts, cancellation, secret redaction, and local audit
+records. Shell execution remains an explicit, confirmed, policy-gated exception.
+
+Audit records improve traceability but are not tamper-proof. Artifact
+attestations establish release provenance but do not prove that an artifact is
+free of vulnerabilities.
 
 ## In Scope
 

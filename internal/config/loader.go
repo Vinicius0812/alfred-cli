@@ -1,19 +1,25 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Options struct {
-	ConfigPath string
-	WorkingDir string
-	Getenv     func(string) string
+	ConfigPath           string
+	WorkingDir           string
+	Getenv               func(string) string
+	LookupEnv            func(string) (string, bool)
+	AllowExternalExtends bool
+	MaxConfigBytes       int64
 }
 
 type Result struct {
@@ -21,8 +27,15 @@ type Result struct {
 	RootDir       string
 	ProjectName   string
 	RequiredTools []string
+	Files         []string
+	Config        Config
 	Errors        ErrorList
 }
+
+const (
+	defaultMaxConfigBytes int64 = 1 << 20
+	maxConfigFiles              = 64
+)
 
 type loadedFile struct {
 	path string
@@ -33,8 +46,18 @@ func LoadAndValidate(opts Options) (Result, error) {
 	if opts.WorkingDir == "" {
 		opts.WorkingDir = "."
 	}
-	if opts.Getenv == nil {
-		opts.Getenv = os.Getenv
+	if opts.LookupEnv == nil {
+		if opts.Getenv != nil {
+			opts.LookupEnv = func(key string) (string, bool) {
+				value := opts.Getenv(key)
+				return value, value != ""
+			}
+		} else {
+			opts.LookupEnv = os.LookupEnv
+		}
+	}
+	if opts.MaxConfigBytes <= 0 {
+		opts.MaxConfigBytes = defaultMaxConfigBytes
 	}
 
 	rootFile, err := resolveRootFile(opts.ConfigPath, opts.WorkingDir)
@@ -47,17 +70,29 @@ func LoadAndValidate(opts Options) (Result, error) {
 		return Result{}, err
 	}
 
+	rootFile, err = filepath.EvalSymlinks(rootFile)
+	if err != nil {
+		return Result{}, fmt.Errorf("could not resolve configuration file: %w", err)
+	}
+	rootFile = filepath.Clean(rootFile)
+	rootDir := filepath.Dir(rootFile)
+
 	state := loadState{
-		visiting: map[string]bool{},
-		loaded:   map[string]bool{},
+		visiting:             map[string]bool{},
+		loaded:               map[string]bool{},
+		rootDir:              rootDir,
+		allowExternalExtends: opts.AllowExternalExtends,
+		maxConfigBytes:       opts.MaxConfigBytes,
 	}
 
 	rootNode, files, validationErrors := state.loadGraph(rootFile)
-	rootDir := filepath.Dir(rootFile)
 	result := Result{
 		RootFile: rootFile,
 		RootDir:  rootDir,
 		Errors:   validationErrors,
+	}
+	for _, file := range files {
+		result.Files = append(result.Files, file.path)
 	}
 
 	if rootNode == nil {
@@ -68,9 +103,18 @@ func LoadAndValidate(opts Options) (Result, error) {
 		result.Errors = append(result.Errors, validateKnownShape(file.path, file.node)...)
 	}
 
-	result.Errors = append(result.Errors, validateFinalConfig(rootFile, rootDir, rootNode, opts.Getenv)...)
+	result.Errors = append(result.Errors, validateFinalConfig(rootFile, rootDir, rootNode, opts.LookupEnv)...)
 	result.ProjectName = projectName(rootNode)
 	result.RequiredTools = requiredTools(rootNode)
+	if len(result.Errors) == 0 {
+		resolved := defaultConfig()
+		if err := rootNode.Decode(&resolved); err != nil {
+			result.Errors = append(result.Errors, ValidationError{File: rootFile, Message: fmt.Sprintf("could not decode resolved configuration: %v", err)})
+		} else {
+			applyModelDefaults(&resolved)
+			result.Config = resolved
+		}
+	}
 	return result, nil
 }
 
@@ -112,9 +156,13 @@ func resolveRootFile(configPath, workingDir string) (string, error) {
 }
 
 type loadState struct {
-	visiting map[string]bool
-	loaded   map[string]bool
-	files    []loadedFile
+	visiting             map[string]bool
+	loaded               map[string]bool
+	files                []loadedFile
+	rootDir              string
+	allowExternalExtends bool
+	maxConfigBytes       int64
+	fileCount            int
 }
 
 func (s *loadState) loadGraph(path string) (*yaml.Node, []loadedFile, ErrorList) {
@@ -130,6 +178,10 @@ func (s *loadState) loadFile(path string) (*yaml.Node, ErrorList) {
 	if err != nil {
 		return nil, ErrorList{{File: path, Message: err.Error()}}
 	}
+	absPath, err = filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return nil, ErrorList{{File: path, Message: fmt.Sprintf("could not resolve file: %v", err)}}
+	}
 	absPath = filepath.Clean(absPath)
 
 	if s.visiting[absPath] {
@@ -138,14 +190,35 @@ func (s *loadState) loadFile(path string) (*yaml.Node, ErrorList) {
 	if s.loaded[absPath] {
 		return emptyMapNode(), nil
 	}
+	if s.fileCount >= maxConfigFiles {
+		return nil, ErrorList{{File: absPath, Path: "extends", Message: fmt.Sprintf("configuration graph exceeds the %d file limit", maxConfigFiles)}}
+	}
+	s.fileCount++
 
-	content, err := os.ReadFile(absPath)
+	file, err := os.Open(absPath)
 	if err != nil {
 		return nil, ErrorList{{File: absPath, Message: fmt.Sprintf("could not read file: %v", err)}}
 	}
+	defer file.Close()
+
+	content, err := io.ReadAll(io.LimitReader(file, s.maxConfigBytes+1))
+	if err != nil {
+		return nil, ErrorList{{File: absPath, Message: fmt.Sprintf("could not read file: %v", err)}}
+	}
+	if int64(len(content)) > s.maxConfigBytes {
+		return nil, ErrorList{{File: absPath, Message: fmt.Sprintf("configuration exceeds the %d byte limit", s.maxConfigBytes)}}
+	}
 
 	var document yaml.Node
-	if err := yaml.Unmarshal(content, &document); err != nil {
+	decoder := yaml.NewDecoder(bytes.NewReader(content))
+	if err := decoder.Decode(&document); err != nil {
+		return nil, ErrorList{{File: absPath, Message: fmt.Sprintf("invalid YAML: %v", err)}}
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, ErrorList{{File: absPath, Message: "configuration must contain exactly one YAML document"}}
+		}
 		return nil, ErrorList{{File: absPath, Message: fmt.Sprintf("invalid YAML: %v", err)}}
 	}
 
@@ -157,6 +230,9 @@ func (s *loadState) loadFile(path string) (*yaml.Node, ErrorList) {
 	if current.Kind != yaml.MappingNode {
 		return nil, ErrorList{{File: absPath, Message: "configuration must be a YAML mapping"}}
 	}
+	if securityErrors := validateYAMLSecurity(absPath, current); len(securityErrors) > 0 {
+		return nil, securityErrors
+	}
 
 	s.visiting[absPath] = true
 	defer delete(s.visiting, absPath)
@@ -165,7 +241,7 @@ func (s *loadState) loadFile(path string) (*yaml.Node, ErrorList) {
 	var errs ErrorList
 	extends := mappingValue(current, "extends")
 	if extends != nil {
-		paths, pathErrs := readExtends(absPath, extends)
+		paths, pathErrs := s.readExtends(absPath, extends)
 		errs = append(errs, pathErrs...)
 		for _, extendedPath := range paths {
 			extendedNode, extendedErrs := s.loadFile(extendedPath)
@@ -183,7 +259,7 @@ func (s *loadState) loadFile(path string) (*yaml.Node, ErrorList) {
 	return merged, errs
 }
 
-func readExtends(file string, node *yaml.Node) ([]string, ErrorList) {
+func (s *loadState) readExtends(file string, node *yaml.Node) ([]string, ErrorList) {
 	if node.Kind != yaml.SequenceNode {
 		return nil, ErrorList{{File: file, Path: "extends", Message: "must be a list of local file paths"}}
 	}
@@ -209,7 +285,17 @@ func readExtends(file string, node *yaml.Node) ([]string, ErrorList) {
 			errs = append(errs, ValidationError{File: file, Path: path, Message: fmt.Sprintf("extended file not found: %s", item.Value)})
 			continue
 		}
-		paths = append(paths, extendedPath)
+		resolvedPath, err := filepath.EvalSymlinks(extendedPath)
+		if err != nil {
+			errs = append(errs, ValidationError{File: file, Path: path, Message: fmt.Sprintf("could not resolve extended file: %v", err)})
+			continue
+		}
+		resolvedPath = filepath.Clean(resolvedPath)
+		if !s.allowExternalExtends && !pathWithin(s.rootDir, resolvedPath) {
+			errs = append(errs, ValidationError{File: file, Path: path, Message: "must remain inside the project root; use --allow-external-extends only for a trusted preset"})
+			continue
+		}
+		paths = append(paths, resolvedPath)
 	}
 
 	return paths, errs
@@ -324,11 +410,11 @@ func requiredTools(node *yaml.Node) []string {
 				if step.Kind != yaml.MappingNode {
 					continue
 				}
-				run := mappingValue(step, "run")
-				if run == nil || run.Kind != yaml.ScalarNode || run.Tag != "!!str" {
+				command := mappingValue(step, "command")
+				if command == nil || command.Kind != yaml.ScalarNode || command.Tag != "!!str" {
 					continue
 				}
-				for _, tool := range toolsFromCommand(run.Value) {
+				for _, tool := range toolsFromStructuredCommand(command.Value) {
 					tools[tool] = true
 				}
 			}
@@ -339,25 +425,38 @@ func requiredTools(node *yaml.Node) []string {
 	for tool := range tools {
 		values = append(values, tool)
 	}
+	sort.Strings(values)
 	return values
 }
 
-func toolsFromCommand(command string) []string {
-	fields := strings.Fields(command)
-	if len(fields) == 0 {
+func applyModelDefaults(resolved *Config) {
+	for name, workflow := range resolved.Workflows {
+		if workflow.Environment == nil {
+			workflow.Environment = map[string]string{}
+		}
+		for i := range workflow.Steps {
+			if workflow.Steps[i].Environment == nil {
+				workflow.Steps[i].Environment = map[string]string{}
+			}
+			if workflow.Steps[i].Risk == "" {
+				workflow.Steps[i].Risk = RiskLocalWrite
+			}
+		}
+		resolved.Workflows[name] = workflow
+	}
+}
+
+func toolsFromStructuredCommand(command string) []string {
+	command = strings.TrimSpace(command)
+	if command == "" || strings.ContainsAny(command, `/\`) {
 		return nil
 	}
-
-	switch fields[0] {
-	case "go", "docker", "npm", "node", "php", "composer":
-		if fields[0] == "npm" {
-			return []string{"node", "npm"}
-		}
-		if fields[0] == "composer" {
-			return []string{"php", "composer"}
-		}
-		return []string{fields[0]}
+	switch command {
+	case "npm":
+		return []string{"node", "npm"}
+	case "composer":
+		return []string{"php", "composer"}
 	default:
-		return nil
+		return []string{command}
 	}
 }

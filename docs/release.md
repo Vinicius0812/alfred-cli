@@ -1,72 +1,75 @@
 # Release Process
 
-Alfred releases are created from Git tags.
+Alfred releases are immutable, versioned GitHub releases created from tags.
 
-## Requirements
+## Preconditions
 
-- all tests pass with `go test ./...`;
-- `go vet ./...`, `go mod verify`, and `govulncheck ./...` pass;
-- the release version follows a `vMAJOR.MINOR.PATCH` format, for example
-  `v0.1.0`;
-- `CHANGELOG.md` has an entry for the release;
-- `LICENSE` is present;
-- the repository has a clean working tree before tagging.
+- the worktree is clean and the intended commit is on the protected default
+  branch;
+- `go test -race ./...`, `go vet ./...`, `go mod verify`, and `govulncheck`
+  pass;
+- GitHub Actions workflows pass `actionlint`;
+- examples pass `alfred config validate`;
+- `CHANGELOG.md` has a non-empty `## vMAJOR.MINOR.PATCH` section;
+- the release tag follows exactly `vMAJOR.MINOR.PATCH`.
+
+Use [Pre-release Checklist](pre-release-checklist.md) for the complete review.
 
 ## Create a release
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
-The GitHub Actions release workflow builds:
+The release workflow verifies that the tag points to the checked-out commit. It
+refuses to replace an existing GitHub release; corrections require a new patch
+version.
 
-- `windows/amd64` as `.zip`;
-- `windows/arm64` as `.zip`;
-- `linux/amd64` as `.tar.gz`;
-- `linux/arm64` as `.tar.gz`;
-- `darwin/amd64` as `.tar.gz`;
-- `darwin/arm64` as `.tar.gz`.
+## Produced targets
 
-It also publishes versioned installer scripts and a `checksums.txt` file with
-SHA-256 checksums for every archive and installer. The installers verify the
-archive checksum before installation.
+- Windows AMD64 and ARM64 ZIP archives;
+- Linux AMD64 and ARM64 tarballs;
+- macOS AMD64 and ARM64 tarballs;
+- SHA-256 `checksums.txt`;
+- versioned `install.ps1` and `install.sh`;
+- one CycloneDX JSON SBOM (`*.cdx.json`) per target;
+- release notes extracted from the exact changelog section.
 
-Published release assets are immutable from the workflow's perspective. If a
-release already exists for a tag, the workflow fails instead of replacing its
-assets. Publish corrections under a new patch version.
+Go builds use `CGO_ENABLED=0`, `-trimpath`, and stripped release symbols. The
+version is injected through `ldflags` and checked on the Linux AMD64 binary
+before publication.
 
-Release notes are extracted from the matching `## vMAJOR.MINOR.PATCH` section
-in `CHANGELOG.md`. The workflow fails if that section is absent or empty.
+## Provenance and smoke tests
 
-## Manual release
+The workflow uses GitHub's OIDC-backed `actions/attest` action, pinned to a
+reviewed full commit SHA, to create Sigstore build-provenance attestations for
+archives, SBOMs, checksums, and installers. The release job has only the write
+permissions required for contents, attestations, OIDC, and artifact metadata.
 
-The workflow can also be started manually from GitHub Actions with a version
-input such as `v0.1.0`.
+After `gh release create`, independent Linux and Windows jobs download the
+published archive and checksum, verify SHA-256, verify the attestation with
+GitHub CLI, execute the extracted binary, run the published installer into a
+temporary directory, and execute the installed binary.
 
-The input must name an existing tag, and that tag must point to the commit being
-built. Pre-release and build suffixes are not accepted by the current workflow.
-
-## Local smoke test
-
-Before tagging, run:
+## Verify as a consumer
 
 ```bash
-go test ./...
-go vet ./...
-go mod verify
-go build -o bin/alfred ./cmd/alfred
-./bin/alfred --version
-./bin/alfred --config examples/go/alfred.yaml config validate
+sha256sum --check checksums.txt --ignore-missing
+gh attestation verify alfred_v0.2.0_linux_amd64.tar.gz \
+  --repo Vinicius0812/alfred-cli
 ```
 
-On Windows:
+On PowerShell:
 
 ```powershell
-go test ./...
-go vet ./...
-go mod verify
-go build -o bin\alfred.exe .\cmd\alfred
-.\bin\alfred.exe --version
-.\bin\alfred.exe --config examples\go\alfred.yaml config validate
+(Get-FileHash .\alfred_v0.2.0_windows_amd64.zip -Algorithm SHA256).Hash
+gh attestation verify .\alfred_v0.2.0_windows_amd64.zip --repo Vinicius0812/alfred-cli
 ```
+
+Compare the PowerShell hash with the exact entry in `checksums.txt`.
+
+## Manual dispatch
+
+The workflow may be started manually with an existing tag. The same tag format,
+commit, tests, provenance, immutability, and smoke-test checks apply.

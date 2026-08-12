@@ -20,14 +20,20 @@ workflows:
   setup:
     description: Prepare application dependencies
     steps:
-      - run: composer install
-      - run: php artisan migrate
+      - command: composer
+        args: [install]
+        risk: network
+      - command: php
+        args: [artisan, migrate]
         confirm: true
+        risk: local-write
 
   test:
     description: Run the PHP test suite
     steps:
-      - run: composer test
+      - command: composer
+        args: [test]
+        risk: read
 
 policies:
   confirm_destructive_actions: true

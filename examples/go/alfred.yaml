@@ -18,14 +18,22 @@ workflows:
   test:
     description: Run unit tests
     steps:
-      - run: go test ./...
+      - command: go
+        args: [test, ./...]
+        risk: read
 
   check:
     description: Format, vet, and test the project
     steps:
-      - run: gofmt -w .
-      - run: go vet ./...
-      - run: go test ./...
+      - command: gofmt
+        args: [-w, .]
+        risk: local-write
+      - command: go
+        args: [vet, ./...]
+        risk: read
+      - command: go
+        args: [test, ./...]
+        risk: read
 
 policies:
   require_clean_worktree: true
